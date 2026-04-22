@@ -1,0 +1,44 @@
+name: RSS 수집 및 K-pop 필터링
+
+on:
+  # 외부(cron-job.org)에서 workflow_dispatch API 호출로 관리
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: RSS 수집 및 K-pop 필터링
+        run: python scripts/collect_and_filter.py
+
+      - name: 변경사항 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then
+            echo "변경사항 없음"
+          else
+            TIMESTAMP=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')
+            PENDING_COUNT=$(python -c "import json; d=json.load(open('data/pending.json')); print(len(d.get('items',[])))" 2>/dev/null || echo "0")
+            git commit -m "RSS 수집: ${TIMESTAMP} (대기 ${PENDING_COUNT}건)"
+            git pull --rebase origin main
+            git push
+          fi

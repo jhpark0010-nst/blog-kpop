@@ -1,0 +1,53 @@
+name: 리뷰 결과 WP 적용
+
+on:
+  push:
+    branches: [main]
+    paths: ['data/review-actions.json']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: review-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: Reviewer 액션 WP 적용
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USERNAME: ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python scripts/apply_review_actions.py
+
+      - name: 처리 결과 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/review-actions.json
+          if git diff --staged --quiet; then
+            echo "변경사항 없음"
+          else
+            git commit -m "review: applied actions to WP"
+            git pull --rebase origin main
+            git push
+          fi

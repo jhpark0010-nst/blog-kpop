@@ -1,0 +1,54 @@
+name: WordPress 초안 발행
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'data/drafts/*.html'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-wordpress
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: WordPress 발행 (이미지 다운로드 + 업로드 포함)
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USERNAME: ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python scripts/publish_drafts.py
+
+      - name: published/ 이동 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/drafts/
+          if git diff --staged --quiet; then
+            echo "변경사항 없음"
+          else
+            git commit -m "WordPress 발행 완료: published/skipped 이동"
+            git pull --rebase origin main
+            git push
+          fi

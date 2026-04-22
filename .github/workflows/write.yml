@@ -1,0 +1,50 @@
+name: Writer (번역 → draft HTML)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: writer
+  cancel-in-progress: false
+
+jobs:
+  write:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: Writer 실행
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL: ${{ secrets.CLAUDE_MODEL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python scripts/write.py
+
+      - name: draft + candidates 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/drafts data/candidates.json
+          if git diff --staged --quiet; then
+            echo "변경사항 없음"
+          else
+            TITLE=$(ls data/drafts/*.html 2>/dev/null | head -1 | xargs -I{} grep -m1 '^Title:' {} 2>/dev/null | sed 's/^Title:\s*//' | head -c 60)
+            git commit -m "draft: ${TITLE:-new article}"
+            git pull --rebase origin main
+            git push
+          fi
