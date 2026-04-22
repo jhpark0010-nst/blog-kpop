@@ -164,13 +164,8 @@ def assemble_html(article: dict, source_item: dict) -> str:
 
     parts = [header]
 
-    # Featured image
-    if thumbnail:
-        parts.append(
-            f'<figure style="margin:0 0 24px 0;">'
-            f'<img src="{thumbnail}" alt="{article.get("featured_alt", "")}" '
-            f'style="width:100%;border-radius:8px;"/></figure>\n'
-        )
+    # Featured image은 본문에 직접 삽입하지 않음 (WP 테마가 featured_media를 상단 표시).
+    # ImageSourceURL은 주석 헤더에 기록돼있고 publish_drafts.py가 featured_media로 업로드.
 
     # Body paragraphs — 순수 번역 문단들
     for para in article.get("body_paragraphs", []):

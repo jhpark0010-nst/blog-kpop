@@ -138,22 +138,30 @@ def upload_to_wp_media(
 
 
 def process_images(html: str, meta: dict[str, str]) -> tuple[str, int | None]:
-    """HTML의 모든 img src → WP 미디어로 교체. (새 HTML, featured_media_id) 반환.
+    """이미지 처리.
 
-    다운로드 완전 실패 시 (None, None) 반환 → 호출자가 skip 결정.
+    1) 본문의 <img src> 태그들은 WP 미디어로 업로드하고 src 교체 (없으면 skip)
+    2) featured_media는 meta의 ImageSourceURL을 우선 업로드 (본문 중복 방지)
+       - ImageSourceURL이 없으면 본문 첫 이미지를 featured_media로 지정
+
+    Returns:
+        (새 HTML, featured_media_id)
+        본문에 <img>가 있었지만 전부 업로드 실패 → ("", None)
+        ImageSourceURL만 있었는데 업로드 실패 → ("", None)
+        처리할 이미지가 아예 없음 → (원본 HTML, None)
     """
     soup = BeautifulSoup(html, "html.parser")
-    imgs = soup.find_all("img")
-    if not imgs:
-        return html, None
-
-    referer = meta.get("imagesourcereferer")
+    body_imgs = soup.find_all("img")
+    referer = meta.get("imagesourcereferer") or None
     featured_alt = meta.get("featuredalt", "")
+    safe_slug = meta.get("slug", "image")
 
     featured_media_id: int | None = None
-    any_success = False
+    body_upload_success = False
+    had_body_imgs = len(body_imgs) > 0
 
-    for idx, img in enumerate(imgs):
+    # 1) 본문 inline 이미지들 업로드 + src 교체
+    for idx, img in enumerate(body_imgs):
         src = img.get("src")
         if not src or not src.startswith("http"):
             continue
@@ -163,11 +171,9 @@ def process_images(html: str, meta: dict[str, str]) -> tuple[str, int | None]:
             continue
         image_bytes, content_type = result
 
-        # 파일명 생성
         ext = content_type.split("/")[-1]
         ext = {"jpeg": "jpg"}.get(ext, ext)
-        safe_slug = meta.get("slug", "image")
-        filename = f"{safe_slug}-{idx + 1}.{ext}"
+        filename = f"{safe_slug}-inline-{idx + 1}.{ext}"
 
         alt = img.get("alt") or (featured_alt if idx == 0 else "")
         upload = upload_to_wp_media(image_bytes, filename, content_type, alt_text=alt)
@@ -177,13 +183,43 @@ def process_images(html: str, meta: dict[str, str]) -> tuple[str, int | None]:
         media_id, new_src = upload
         if new_src:
             img["src"] = new_src
-        any_success = True
+        body_upload_success = True
 
-        if idx == 0:
+        # body 이미지가 첫 번째인 경우만 featured 기본값 (ImageSourceURL 없을 때 fallback)
+        if idx == 0 and featured_media_id is None:
             featured_media_id = media_id
 
-    if not any_success:
+    # 본문에 img가 있었는데 전부 실패 → skip
+    if had_body_imgs and not body_upload_success:
         return "", None
+
+    # 2) featured_media: meta의 ImageSourceURL 업로드 (본문 중복 없는 기본 경로)
+    source_url = meta.get("imagesourceurl", "")
+    if source_url and source_url.startswith("http"):
+        # 이미 body_imgs에 같은 URL이 처리됐으면 중복 업로드 하지 않음
+        already_uploaded = any(
+            (img.get("src") or "").startswith(os.environ.get("WP_URL", ""))
+            and i == 0  # 첫 번째만 검사 (featured 후보)
+            for i, img in enumerate(body_imgs)
+        )
+        if not already_uploaded:
+            result = download_image(source_url, referer=referer)
+            if result:
+                image_bytes, content_type = result
+                ext = content_type.split("/")[-1]
+                ext = {"jpeg": "jpg"}.get(ext, ext)
+                filename = f"{safe_slug}-featured.{ext}"
+                upload = upload_to_wp_media(
+                    image_bytes, filename, content_type, alt_text=featured_alt
+                )
+                if upload:
+                    featured_media_id = upload[0]
+                elif not had_body_imgs:
+                    # body img 없고 featured 업로드도 실패 → skip
+                    return "", None
+            elif not had_body_imgs:
+                # body img 없고 featured 다운로드도 실패 → skip
+                return "", None
 
     return str(soup), featured_media_id
 
