@@ -19,9 +19,10 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-WP_URL = os.environ["WP_URL"].rstrip("/")
-WP_USERNAME = os.environ["WP_USERNAME"]
-WP_APP_PASSWORD = os.environ["WP_APP_PASSWORD"]
+# env 변수 지연 접근 (write.py import 시 env 없어도 안 깨지도록)
+WP_URL = os.environ.get("WP_URL", "").rstrip("/")
+WP_USERNAME = os.environ.get("WP_USERNAME", "")
+WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 DRAFTS_DIR = Path("data/drafts")
@@ -236,6 +237,65 @@ def append_publish_comment(html: str, post_id: int, wp_link: str) -> str:
     return html + tail
 
 
+def publish_single_draft(path: Path) -> dict:
+    """단일 draft 파일을 이미지 업로드 + WP 발행 + published/ 이동까지 처리.
+
+    Slack 알림은 보내지 않음 (호출자가 결정).
+
+    Returns:
+        dict with keys:
+          - status: "success" | "skipped" | "failed"
+          - title, file (always)
+          - link, post_id (success only)
+          - reason (skipped only)
+          - error (failed only)
+    """
+    html = path.read_text(encoding="utf-8")
+    meta = parse_comment_meta(html)
+    title = meta.get("title") or path.stem
+    slug = meta.get("slug") or DATE_PATTERN.sub("", path.stem).lower()
+    meta_desc = meta.get("meta", "")
+
+    new_html, featured_media = process_images(html, meta)
+    if not new_html:
+        dest = SKIPPED_DIR / path.name
+        shutil.move(str(path), str(dest))
+        return {
+            "status": "skipped",
+            "title": title,
+            "file": path.name,
+            "reason": "이미지 다운로드/업로드 실패",
+        }
+
+    try:
+        post_id, link = publish_to_wp(title, new_html, meta_desc, slug, featured_media)
+        final_html = append_publish_comment(new_html, post_id, link)
+        dest = PUBLISHED_DIR / path.name
+        dest.write_text(final_html, encoding="utf-8")
+        path.unlink()
+        return {
+            "status": "success",
+            "title": title,
+            "file": path.name,
+            "link": link,
+            "post_id": post_id,
+        }
+    except requests.HTTPError as e:
+        return {
+            "status": "failed",
+            "title": title,
+            "file": path.name,
+            "error": f"HTTP {e.response.status_code}: {e.response.text[:300]}",
+        }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "title": title,
+            "file": path.name,
+            "error": str(e),
+        }
+
+
 def main() -> int:
     files = sorted(
         f for f in DRAFTS_DIR.glob("*.html") if DATE_PATTERN.match(f.name)
@@ -248,49 +308,28 @@ def main() -> int:
     success, failures, skipped = [], [], []
 
     for path in files:
-        html = path.read_text(encoding="utf-8")
-        meta = parse_comment_meta(html)
-        title = meta.get("title") or path.stem
-        slug = meta.get("slug") or DATE_PATTERN.sub("", path.stem).lower()
-        meta_desc = meta.get("meta", "")
+        result = publish_single_draft(path)
+        status = result["status"]
 
-        # 이미지 처리
-        new_html, featured_media = process_images(html, meta)
-        if not new_html:
-            # 이미지 다운로드/업로드 전부 실패 → skip
-            dest = SKIPPED_DIR / path.name
-            shutil.move(str(path), str(dest))
-            skipped.append(path.name)
+        if status == "success":
+            success.append(result)
             slack_notify(
-                f"⚠️ *발행 스킵*\n제목: {title}\n"
-                f"사유: 이미지 다운로드/업로드 실패. drafts/skipped/ 로 이동."
+                f"📝 *새 글 공개 발행*\n제목: {result['title']}\nWordPress: {result['link']}"
             )
-            print(f"SKIP: {path.name}", file=sys.stderr)
-            continue
-
-        try:
-            post_id, link = publish_to_wp(title, new_html, meta_desc, slug, featured_media)
-
-            # WpPostId/WpLink 주석 추가 후 published/ 로 이동
-            final_html = append_publish_comment(new_html, post_id, link)
-            dest = PUBLISHED_DIR / path.name
-            dest.write_text(final_html, encoding="utf-8")
-            path.unlink()
-
-            success.append({"title": title, "link": link, "file": path.name})
+            print(f"OK: {result['file']} → {result['link']} (post_id={result['post_id']})")
+        elif status == "skipped":
+            skipped.append(result)
             slack_notify(
-                f"📝 *새 글 공개 발행*\n제목: {title}\nWordPress: {link}"
+                f"⚠️ *발행 스킵*\n제목: {result['title']}\n"
+                f"사유: {result['reason']}. drafts/skipped/ 로 이동."
             )
-            print(f"OK: {path.name} → {link} (post_id={post_id})")
-        except requests.HTTPError as e:
-            err = f"HTTP {e.response.status_code}: {e.response.text[:300]}"
-            failures.append({"file": path.name, "error": err})
-            slack_notify(f"❌ *WordPress 발행 실패*\n파일: {path.name}\n에러: {err}")
-            print(f"FAIL: {path.name} - {err}", file=sys.stderr)
-        except Exception as e:
-            failures.append({"file": path.name, "error": str(e)})
-            slack_notify(f"❌ *WordPress 발행 실패*\n파일: {path.name}\n에러: {e}")
-            print(f"FAIL: {path.name} - {e}", file=sys.stderr)
+            print(f"SKIP: {result['file']}", file=sys.stderr)
+        else:  # failed
+            failures.append(result)
+            slack_notify(
+                f"❌ *WordPress 발행 실패*\n파일: {result['file']}\n에러: {result['error']}"
+            )
+            print(f"FAIL: {result['file']} - {result['error']}", file=sys.stderr)
 
     slack_notify(
         f"📊 *발행 요약*\n"

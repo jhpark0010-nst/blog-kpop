@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Tier 3 Writer (GitHub Actions 진입점).
 
-candidates.json 상위 1건 선택 → Anthropic API로 영어 번역 + SEO HTML 생성 →
-data/drafts/YYYY-MM-DD-{slug}.html 저장.
+번역 중심 K-pop 블로그. candidates 상위 N건을 순차 처리:
+  1건 선택 → API 번역 → draft 저장 → WP 발행 (inline) → candidates 제거
+  → git commit + push → Slack 알림 → 다음 1건
+
+한 건이 완전히 끝나야 다음 건 시작. 중간 실패해도 이미 발행된 건은 보존.
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -19,9 +25,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import (
     CANDIDATES_PATH,
+    WRITER_ARTICLES_PER_RUN,
     WRITER_TARGET_WORD_COUNT_MAX,
     WRITER_TARGET_WORD_COUNT_MIN,
 )
+from scripts.publish_drafts import publish_single_draft
 from src.anthropic_helper import call_json, estimate_cost_usd
 
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
@@ -35,54 +43,47 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = f"""You are a bilingual editor who translates Korean K-pop news into SEO-optimized English blog posts for global K-pop fans.
+SYSTEM_PROMPT = f"""You translate Korean K-pop news into SEO-optimized English blog posts for global K-pop fans.
 
-## Output rules
+## Goal
 
-Reply with **raw JSON only** (no markdown code fence, no prose wrapper). Schema:
+**Translation-focused**. Stay close to the source's structure and facts. Do NOT add invented content (no FAQs, no summary boxes, no fabricated quotes, no made-up numbers).
+
+## Output
+
+Reply with **raw JSON only** (no markdown fence, no prose wrapper). Schema:
 
 ```
 {{
-  "title_en": "English title, 40-65 chars, main keyword front-loaded",
-  "slug": "english-slug-with-hyphens (3-6 meaningful words)",
-  "meta_desc": "140-155 char English meta description with main keyword",
-  "tags": ["tag1", "tag2", "tag3"],
-  "featured_alt": "Descriptive alt text for lead image including artist name",
-  "lead_paragraph": "Opening paragraph, 60-90 words, includes artist name + number/date in first sentence",
-  "summary_bullets": ["3-4 concise bullet points for key summary box"],
-  "body_sections": [
-    {{"h2": "Question-style or keyword H2", "paragraphs": ["paragraph 1", "paragraph 2"]}},
-    {{"h2": "...", "paragraphs": ["..."]}}
-  ],
-  "faq": [
-    {{"q": "Question in PAA style (Why/When/How/Who)", "a": "Concise answer"}},
-    {{"q": "...", "a": "..."}},
-    {{"q": "...", "a": "..."}}
-  ],
-  "one_liner": "One-sentence key takeaway"
+  "title_en": "40-65 chars; main keyword (artist/song/event) in first 30 chars",
+  "slug": "lowercase-hyphens; 3-6 meaningful words",
+  "meta_desc": "120-155 chars; includes main keyword + specific fact (number/date)",
+  "tags": ["3-5 tags: artists, events, key concepts"],
+  "featured_alt": "Short alt text including artist name",
+  "body_paragraphs": ["paragraph 1", "paragraph 2", "..."]
 }}
 ```
 
-## Content rules
+## Body rules
 
-- Total English body (lead + sections + faq answers): **{WRITER_TARGET_WORD_COUNT_MIN}-{WRITER_TARGET_WORD_COUNT_MAX} words**
-- 3-5 body_sections. Each section: 1-2 paragraphs.
-- Exactly 3 FAQ entries in PAA ("People Also Ask") style
-- Preserve Korean proper nouns as standard English transliteration (BTS, BLACKPINK, Jennie, Rosé, etc.)
-- For K-pop industry terms unfamiliar to Western readers, add brief parenthetical gloss (e.g., "comeback (a new album release)")
-- Never fabricate numbers, dates, chart positions. Only use facts explicitly in the source.
-- If the source is weak in specific facts, focus on what IS stated; do not invent.
-- Tone: Informative fan-friendly blog voice. Neither tabloid-sensational nor dry-wire-copy.
+- **{WRITER_TARGET_WORD_COUNT_MIN}-{WRITER_TARGET_WORD_COUNT_MAX} total words** across all paragraphs.
+- 3-6 paragraphs, each 50-90 words.
+- **First paragraph MUST include: artist/group name + specific fact (number, date, chart position, venue)**.
+- Translate the source article faithfully. Preserve original numbers, dates, quotes, chart positions.
+- K-pop proper nouns in standard English: BTS, BLACKPINK, NewJeans, Jennie, Rosé, Jungkook, RM, etc.
+- For uniquely Korean concepts (e.g., "컴백", "팬미팅"), use standard English ("comeback", "fan meeting") or add brief gloss on first mention.
+- **Never invent facts** not present in the source.
 
-## SEO checklist (follow strictly)
+## SEO essentials
 
-- Title: main keyword (artist name or song title) in first 30 characters
-- Meta description: includes title keyword + specific number/fact
-- Slug: English lowercase hyphen-separated, 3-6 words
-- Lead paragraph: artist name + specific fact/date/number in first sentence
-- H2s: questions or keyword-rich phrases (not generic "Introduction"/"Conclusion")
-- FAQ questions: natural PAA phrasings
-"""
+- Main keyword (artist/song/event) appears naturally in: `title_en` (front-loaded), `meta_desc`, `slug`, first paragraph.
+- Readability trumps keyword stuffing. Write as native English prose.
+- `tags`: 3-5 relevant tags — artist names, song titles, events, major keywords.
+- `featured_alt`: concise, includes artist name and situation (e.g., "BTS performing at Tokyo Dome 2026 Arirang tour").
+
+## Tone
+
+Fan-friendly informative blog voice. Not tabloid (no sensationalism), not wire copy (not dry)."""
 
 
 def load_json(path: Path, default=None):
@@ -107,17 +108,16 @@ def slack_notify(text: str) -> None:
         logger.warning(f"Slack 알림 실패: {e}")
 
 
-def pick_top_candidate(items: list[dict]) -> dict | None:
-    """score 최상위 + collected_at 최신 1건 선택."""
-    if not items:
-        return None
-    # 상위 3개 중 가장 최신
-    top_n = sorted(items, key=lambda x: x.get("score", 0), reverse=True)[:3]
-    return max(top_n, key=lambda x: x.get("collected_at", ""))
+def pick_top_candidates(items: list[dict], n: int) -> list[dict]:
+    """score 상위 N건 선택. 동점 시 collected_at 최신 우선."""
+    return sorted(
+        items,
+        key=lambda x: (x.get("score", 0), x.get("collected_at", "")),
+        reverse=True,
+    )[:n]
 
 
 def build_user_message(item: dict) -> str:
-    """Claude에게 번역 요청할 입력."""
     return (
         "## Source Article (Korean)\n\n"
         f"**Source URL**: {item.get('link', '')}\n"
@@ -132,8 +132,8 @@ def build_user_message(item: dict) -> str:
     )
 
 
-def assemble_html(article: dict, meta: dict, source_item: dict) -> str:
-    """Claude JSON 결과 + 원본 메타를 최종 HTML 주석 + 본문으로 조립."""
+def assemble_html(article: dict, source_item: dict) -> str:
+    """Claude JSON 결과 + 원본 메타 → 간결한 번역글 HTML."""
     created_at = datetime.now().isoformat()
     source_url = source_item.get("link", "")
     source_host = ""
@@ -145,7 +145,7 @@ def assemble_html(article: dict, meta: dict, source_item: dict) -> str:
     thumbnail = source_item.get("thumbnail_url") or ""
     tags = ", ".join(article.get("tags", []))
 
-    # ── 주석 헤더 ──
+    # 주석 헤더
     header = (
         "<!--\n"
         f"Title: {article['title_en']}\n"
@@ -162,10 +162,9 @@ def assemble_html(article: dict, meta: dict, source_item: dict) -> str:
         "-->\n"
     )
 
-    # ── 본문 HTML ──
     parts = [header]
 
-    # Featured image (원본 URL — publish-to-wordpress.yml이 WP media로 교체)
+    # Featured image
     if thumbnail:
         parts.append(
             f'<figure style="margin:0 0 24px 0;">'
@@ -173,75 +172,170 @@ def assemble_html(article: dict, meta: dict, source_item: dict) -> str:
             f'style="width:100%;border-radius:8px;"/></figure>\n'
         )
 
-    # Lead paragraph
-    parts.append(
-        f'<p style="margin-bottom:1.5em;line-height:1.8;">{article["lead_paragraph"]}</p>\n'
-    )
-
-    # Summary bullets box
-    bullets = article.get("summary_bullets") or []
-    if bullets:
+    # Body paragraphs — 순수 번역 문단들
+    for para in article.get("body_paragraphs", []):
+        if not para.strip():
+            continue
         parts.append(
-            '<div style="background:#EFF6FF;border-left:4px solid #2563EB;'
-            'padding:20px 24px;border-radius:8px;margin:24px 0;">\n'
-            '<strong>Key Points</strong>\n<ul>\n'
-        )
-        for b in bullets:
-            parts.append(f"  <li>{b}</li>\n")
-        parts.append("</ul>\n</div>\n")
-
-    # Body sections
-    for section in article.get("body_sections", []):
-        h2 = section.get("h2", "")
-        paragraphs = section.get("paragraphs", [])
-        parts.append(
-            f'<h2 style="margin-top:40px;border-bottom:2px solid #E2E8F0;'
-            f'padding-bottom:8px;">{h2}</h2>\n'
-        )
-        for p in paragraphs:
-            parts.append(f'<p style="margin-bottom:1.5em;line-height:1.8;">{p}</p>\n')
-
-    # FAQ
-    faqs = article.get("faq") or []
-    if faqs:
-        parts.append(
-            '<h2 style="margin-top:40px;border-bottom:2px solid #E2E8F0;'
-            'padding-bottom:8px;">FAQ</h2>\n'
-        )
-        for f in faqs:
-            q = f.get("q", "")
-            a = f.get("a", "")
-            parts.append(
-                '<details style="margin-bottom:12px;border:1px solid #E2E8F0;'
-                'border-radius:6px;padding:12px;">\n'
-                f"<summary><strong>Q. {q}</strong></summary>\n"
-                f"<p>A. {a}</p>\n"
-                "</details>\n"
-            )
-
-    # One-liner conclusion
-    one_liner = article.get("one_liner", "").strip()
-    if one_liner:
-        parts.append(
-            f'<p style="margin-top:32px;padding:16px 20px;background:#F8FAFC;'
-            f'border-left:3px solid #64748B;border-radius:4px;font-style:italic;">'
-            f"{one_liner}</p>\n"
+            f'<p style="margin-bottom:1.5em;line-height:1.8;">{para}</p>\n'
         )
 
-    # Source link
+    # Source credit
     if source_url:
+        original_title = source_item.get("title", source_url)
         parts.append(
-            f'<p style="margin-top:24px;font-size:0.9em;color:#64748B;">'
+            f'<p style="margin-top:32px;font-size:0.9em;color:#64748B;">'
             f'Source: <a href="{source_url}" target="_blank" rel="noopener">'
-            f"{source_item.get('title', source_url)}</a></p>\n"
+            f"{original_title}</a></p>\n"
         )
 
     return "".join(parts)
 
 
+def git_commit_push(message: str) -> bool:
+    """로컬 git add/commit/push. 성공/실패 반환. 변경사항 없으면 True."""
+    try:
+        subprocess.run(["git", "add", "data/"], check=True, cwd=PROJECT_ROOT)
+        # staged 변경사항 확인
+        result = subprocess.run(
+            ["git", "diff", "--staged", "--quiet"],
+            cwd=PROJECT_ROOT,
+        )
+        if result.returncode == 0:
+            logger.info("변경사항 없음 (commit 생략)")
+            return True
+        subprocess.run(
+            ["git", "commit", "-m", message],
+            check=True,
+            cwd=PROJECT_ROOT,
+        )
+        # pull rebase + push (충돌 대비)
+        subprocess.run(
+            ["git", "pull", "--rebase", "origin", "main"],
+            check=True,
+            cwd=PROJECT_ROOT,
+        )
+        subprocess.run(["git", "push", "origin", "main"], check=True, cwd=PROJECT_ROOT)
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"git 실패: {e}")
+        return False
+
+
+def process_one_candidate(candidate: dict, idx: int, total: int) -> dict:
+    """단일 candidate 처리: API 번역 → draft 저장 → 발행 → candidates 제거 → commit+push.
+
+    Returns: {"status": "success"|"skipped"|"failed", "title": ..., ...}
+    """
+    title_original = candidate.get("title", "(no title)")[:60]
+    logger.info(f"[{idx}/{total}] 시작: [{candidate.get('score', 0)}점] {title_original}")
+
+    # 1) API 호출
+    try:
+        article, api_meta = call_json(
+            system=SYSTEM_PROMPT,
+            user=build_user_message(candidate),
+            max_tokens=2500,
+            temperature=0.4,
+        )
+    except Exception as e:
+        logger.error(f"API 실패: {e}")
+        return {
+            "status": "api_failed",
+            "title": title_original,
+            "error": str(e)[:300],
+            "api_meta": None,
+        }
+
+    # 필수 필드 검증
+    required = ["title_en", "slug", "meta_desc", "body_paragraphs"]
+    missing = [k for k in required if not article.get(k)]
+    if missing:
+        logger.error(f"응답 필드 누락: {missing}")
+        return {
+            "status": "schema_failed",
+            "title": title_original,
+            "error": f"응답 필드 누락: {missing}",
+            "api_meta": api_meta,
+        }
+
+    # slug 정규화
+    slug = re.sub(r"[^a-z0-9-]", "", article["slug"].lower())
+    if not slug:
+        return {
+            "status": "schema_failed",
+            "title": title_original,
+            "error": f"slug 정규화 실패 ({article['slug']})",
+            "api_meta": api_meta,
+        }
+    article["slug"] = slug
+
+    # 2) draft 저장
+    today = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{today}-{slug}.html"
+    draft_path = DRAFTS_DIR / filename
+    # 동일 파일 이미 있으면 카운터 접미
+    if draft_path.exists():
+        i = 2
+        while (DRAFTS_DIR / f"{today}-{slug}-{i}.html").exists():
+            i += 1
+        filename = f"{today}-{slug}-{i}.html"
+        draft_path = DRAFTS_DIR / filename
+
+    html = assemble_html(article, candidate)
+    draft_path.write_text(html, encoding="utf-8")
+    logger.info(f"draft 저장: {filename} ({len(html)} chars)")
+
+    # 3) 발행 inline (publish_single_draft 호출)
+    pub_result = publish_single_draft(draft_path)
+    pub_status = pub_result.get("status")
+    logger.info(f"publish 결과: {pub_status}")
+
+    # 4) candidates.json에서 이 guid 제거 (발행 성공/스킵 모두 제거 — 재시도 방지)
+    candidates_data = load_json(CANDIDATES_PATH, {"last_updated": "", "items": []})
+    items = candidates_data.get("items", [])
+    remaining = [i for i in items if i.get("guid") != candidate.get("guid")]
+    save_json(CANDIDATES_PATH, {
+        "last_updated": datetime.now().isoformat(),
+        "items": remaining,
+    })
+
+    # 5) git commit + push (이 한 건의 모든 변경사항)
+    commit_msg = {
+        "success": f"publish: {article['title_en']}",
+        "skipped": f"skip (image fail): {article['title_en']}",
+        "failed": f"draft (publish fail): {article['title_en']}",
+    }.get(pub_status, f"draft: {article['title_en']}")
+    git_commit_push(commit_msg)
+
+    return {
+        "status": pub_status,
+        "title_en": article["title_en"],
+        "title": title_original,
+        "slug": slug,
+        "link": pub_result.get("link"),
+        "error": pub_result.get("error") or pub_result.get("reason"),
+        "api_meta": api_meta,
+        "candidates_remaining": len(remaining),
+    }
+
+
 def main() -> int:
     logger.info("=" * 50)
-    logger.info(f"Writer 시작: {datetime.now().isoformat()}")
+    logger.info(f"Writer 시작: {datetime.now().isoformat()} (per-run 목표: {WRITER_ARTICLES_PER_RUN}편)")
+
+    # git config 초기 설정 (GitHub Actions 러너 기준)
+    try:
+        subprocess.run(
+            ["git", "config", "user.email", "writer@blog-kpop.local"],
+            check=True, cwd=PROJECT_ROOT,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "blog-kpop-writer"],
+            check=True, cwd=PROJECT_ROOT,
+        )
+    except subprocess.CalledProcessError:
+        pass  # 이미 설정돼있거나 로컬 테스트
 
     candidates_data = load_json(CANDIDATES_PATH, {"last_updated": "", "items": []})
     items = candidates_data.get("items", [])
@@ -251,80 +345,60 @@ def main() -> int:
         slack_notify("⏸️ *Writer*: 작성 후보 없음")
         return 0
 
-    selected = pick_top_candidate(items)
-    if not selected:
-        slack_notify("⏸️ *Writer*: 후보 선택 실패")
-        return 0
+    selected = pick_top_candidates(items, WRITER_ARTICLES_PER_RUN)
+    actual_n = len(selected)
+    logger.info(f"선택: {actual_n}건")
 
-    logger.info(f"선택: [{selected.get('score', 0)}점] {selected.get('title', '')}")
+    results = []
+    total_in = total_out = 0
+    model_used = "?"
 
-    try:
-        article, meta = call_json(
-            system=SYSTEM_PROMPT,
-            user=build_user_message(selected),
-            max_tokens=3500,
-            temperature=0.4,
-        )
-    except Exception as e:
-        logger.error(f"API 호출 실패: {e}")
-        slack_notify(f"❌ *Writer 실패*\n제목: {selected.get('title', '')[:60]}\n에러: {str(e)[:300]}")
-        return 1
+    for idx, candidate in enumerate(selected, 1):
+        result = process_one_candidate(candidate, idx, actual_n)
+        results.append(result)
 
-    # 필수 필드 검증
-    required = ["title_en", "slug", "meta_desc", "lead_paragraph", "body_sections"]
-    missing = [k for k in required if not article.get(k)]
-    if missing:
-        logger.error(f"응답 필드 누락: {missing}")
-        logger.error(f"응답: {json.dumps(article, ensure_ascii=False)[:500]}")
-        slack_notify(f"❌ *Writer 실패*: 응답 필드 누락 {missing}")
-        return 1
+        api_meta = result.get("api_meta") or {}
+        total_in += api_meta.get("input_tokens", 0)
+        total_out += api_meta.get("output_tokens", 0)
+        if api_meta.get("model"):
+            model_used = api_meta["model"]
 
-    # Slug 정규화 (영문 소문자 하이픈만)
-    slug = re.sub(r"[^a-z0-9-]", "", article["slug"].lower())
-    if not slug:
-        slack_notify(f"❌ *Writer 실패*: slug 정규화 실패 ({article['slug']})")
-        return 1
-    article["slug"] = slug
+        status = result["status"]
+        if status == "success":
+            slack_notify(
+                f"✍️📝 *작성+발행 완료* ({idx}/{actual_n})\n"
+                f"제목: {result['title_en']}\n"
+                f"WordPress: {result.get('link', '-')}\n"
+                f"candidates 남음: {result.get('candidates_remaining', '?')}건"
+            )
+        elif status == "skipped":
+            slack_notify(
+                f"⚠️ *이미지 실패, 발행 스킵* ({idx}/{actual_n})\n"
+                f"제목: {result['title_en']}\n"
+                f"사유: {result.get('error', '-')}"
+            )
+        elif status in ("failed", "api_failed", "schema_failed"):
+            slack_notify(
+                f"❌ *{idx}/{actual_n} 실패*\n"
+                f"제목: {result.get('title_en', result.get('title', '-'))}\n"
+                f"에러: {str(result.get('error', ''))[:300]}"
+            )
+        # 다음 편으로 계속
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    filename = f"{today}-{slug}.html"
-    html = assemble_html(article, meta, selected)
-
-    filepath = DRAFTS_DIR / filename
-    filepath.write_text(html, encoding="utf-8")
-    logger.info(f"draft 저장: {filepath.name} ({len(html)} chars)")
-
-    # candidates.json에서 이 guid 제거
-    remaining = [i for i in items if i.get("guid") != selected.get("guid")]
-    save_json(CANDIDATES_PATH, {
-        "last_updated": datetime.now().isoformat(),
-        "items": remaining,
-    })
-
-    # 단어 수 추정
-    word_count = sum(
-        len(s.split())
-        for section in article.get("body_sections", [])
-        for s in section.get("paragraphs", [])
-    )
-    word_count += len(article.get("lead_paragraph", "").split())
-    word_count += sum(len(f.get("a", "").split()) for f in article.get("faq", []))
-
-    cost = estimate_cost_usd(meta["input_tokens"], meta["output_tokens"], meta["model"])
+    cost = estimate_cost_usd(total_in, total_out, model_used)
+    success_count = sum(1 for r in results if r["status"] == "success")
+    skipped_count = sum(1 for r in results if r["status"] == "skipped")
+    failed_count = len(results) - success_count - skipped_count
 
     summary = (
-        f"✍️ *Writer 완료*\n"
-        f"제목: {article['title_en']}\n"
-        f"slug: {slug}\n"
-        f"점수: {selected.get('score', 0)} | 약 {word_count} words\n"
-        f"candidates 남음: {len(remaining)}건\n"
-        f"모델: {meta['model']} | 토큰 {meta['input_tokens']}in/{meta['output_tokens']}out | "
-        f"약 ${cost:.4f}"
+        f"🏁 *Writer 완료*\n"
+        f"처리: {len(results)}건 (성공 {success_count} / 스킵 {skipped_count} / 실패 {failed_count})\n"
+        f"모델: {model_used} | 토큰 {total_in}in/{total_out}out | 약 ${cost:.4f}"
     )
     logger.info(summary)
     slack_notify(summary)
 
-    return 0
+    return 0 if failed_count == 0 else 1
 
 
 if __name__ == "__main__":
