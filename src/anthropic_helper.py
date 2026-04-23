@@ -83,18 +83,51 @@ def call_json(
     max_tokens: int = 4000,
     model: str | None = None,
     temperature: float = 0.3,
+    retries: int = 2,
 ) -> tuple[dict, dict]:
-    """JSON 리턴 기대하는 API 호출. 파싱 실패 시 재시도 없이 예외."""
-    text, meta = call_messages(
-        system=system, user=user, max_tokens=max_tokens, model=model, temperature=temperature
-    )
-    stripped = strip_code_fences(text)
-    try:
-        return json.loads(stripped), meta
-    except json.JSONDecodeError as e:
-        print(f"JSON 파싱 실패: {e}", file=sys.stderr)
-        print(f"원본: {text[:500]}", file=sys.stderr)
-        raise
+    """JSON 리턴 기대하는 API 호출. 파싱 실패 시 retries 회까지 자동 재시도.
+
+    재시도 시 temperature 를 살짝 흔들어 같은 고장 응답을 피한다. 누적 토큰은
+    모든 호출을 합산해서 반환 (비용 집계 용).
+    """
+    last_exc: Exception | None = None
+    total_in = total_out = 0
+    final_model = model
+
+    for attempt in range(retries + 1):
+        temp = temperature + (0.1 * attempt)  # 1차 원본, 2차 +0.1, 3차 +0.2
+        text, meta = call_messages(
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+            model=model,
+            temperature=min(temp, 1.0),
+        )
+        total_in += meta.get("input_tokens", 0)
+        total_out += meta.get("output_tokens", 0)
+        final_model = meta.get("model", final_model)
+
+        stripped = strip_code_fences(text)
+        try:
+            parsed = json.loads(stripped)
+            return parsed, {
+                "stop_reason": meta.get("stop_reason"),
+                "input_tokens": total_in,
+                "output_tokens": total_out,
+                "model": final_model,
+                "json_retries": attempt,
+            }
+        except json.JSONDecodeError as e:
+            last_exc = e
+            print(
+                f"JSON 파싱 실패 (attempt {attempt + 1}/{retries + 1}): {e}",
+                file=sys.stderr,
+            )
+            if attempt == retries:
+                print(f"최종 원본 앞 500자: {text[:500]}", file=sys.stderr)
+
+    assert last_exc is not None
+    raise last_exc
 
 
 def estimate_cost_usd(input_tokens: int, output_tokens: int, model: str) -> float:

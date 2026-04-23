@@ -14,14 +14,12 @@
 """
 from __future__ import annotations
 
-import glob
 import json
 import logging
 import os
 import re
 import sys
-import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -163,17 +161,38 @@ def fetch_source_summary(url: str, max_chars: int = 2000) -> str | None:
         return None
 
 
+def _parse_created_iso(meta: dict) -> datetime | None:
+    """HTML 주석의 Created 또는 PublishedAt ISO 타임스탬프 파싱."""
+    for key in ("publishedat", "created"):
+        v = meta.get(key, "").strip()
+        if not v:
+            continue
+        try:
+            return datetime.fromisoformat(v)
+        except ValueError:
+            continue
+    return None
+
+
 def collect_recent_titles(exclude_path: Path) -> list[str]:
-    """최근 7일 내 published 글 제목 (자신 제외)."""
-    cutoff = time.time() - DEDUP_LOOKBACK_DAYS * 86400
+    """최근 7일 내 published 글 제목 (자신 제외).
+
+    mtime 대신 HTML 주석의 Created/PublishedAt 을 사용 — GitHub Actions 의
+    actions/checkout 이 모든 파일 mtime 을 체크아웃 시점으로 덮어쓰기 때문.
+    """
+    now = datetime.now()
     titles = []
     for html_path in PUBLISHED_DIR.glob("*.html"):
         if html_path == exclude_path:
             continue
-        if html_path.stat().st_mtime < cutoff:
-            continue
         text = html_path.read_text(encoding="utf-8")[:3000]
         meta = parse_comment_meta(text)
+        created = _parse_created_iso(meta)
+        if created is None:
+            continue
+        created_naive = created.replace(tzinfo=None) if created.tzinfo else created
+        if (now - created_naive).total_seconds() > DEDUP_LOOKBACK_DAYS * 86400:
+            continue
         if t := meta.get("title"):
             titles.append(t)
     return titles
@@ -248,11 +267,26 @@ def main() -> int:
         slack_notify("🔍 *Reviewer*: published 디렉토리 없음")
         return 0
 
-    cutoff = time.time() - REVIEW_WINDOW_HOURS * 3600
-    files = sorted(
-        (p for p in PUBLISHED_DIR.glob("*.html") if p.stat().st_mtime >= cutoff),
-        key=lambda p: p.stat().st_mtime,
-    )
+    # GitHub Actions 의 actions/checkout 이 모든 파일 mtime 을 덮어쓰므로
+    # mtime 필터는 쓸 수 없다. HTML 주석의 Created/PublishedAt 을 사용.
+    now = datetime.now()
+    cutoff = now - timedelta(hours=REVIEW_WINDOW_HOURS)
+
+    def _file_created(p: Path) -> datetime | None:
+        text = p.read_text(encoding="utf-8")[:3000]
+        meta = parse_comment_meta(text)
+        dt = _parse_created_iso(meta)
+        if dt is None:
+            return None
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+    candidates = []
+    for p in PUBLISHED_DIR.glob("*.html"):
+        created = _file_created(p)
+        if created is None or created < cutoff:
+            continue
+        candidates.append((created, p))
+    files = [p for _, p in sorted(candidates, key=lambda x: x[0])]
     logger.info(f"최근 {REVIEW_WINDOW_HOURS}h 발행글: {len(files)}건")
 
     if not files:

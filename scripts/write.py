@@ -103,7 +103,17 @@ Reply with **raw JSON only** (no markdown fence, no prose wrapper). Schema:
 
 ## Tone
 
-Fan-friendly informative blog voice. Not tabloid (no sensationalism), not wire copy (not dry)."""
+Fan-friendly informative blog voice. Not tabloid (no sensationalism), not wire copy (not dry).
+
+## ⚠️ JSON string escaping (strict)
+
+Your entire response is a single JSON object. **Do NOT put raw ASCII double quotes inside any string field** — they will break JSON parsing. When quoting speech, titles, or phrases inside `title_en`, `meta_desc`, or any `body_paragraphs` item:
+
+- Prefer curly/smart quotes: left U+201C and right U+201D (“ … ”)
+- Or use single quotes: 'like this'
+- Only use JSON-escaped ASCII quotes if you really must
+
+If the source Korean uses ASCII double quotes around a phrase, translate with smart quotes. Never emit a literal ASCII `"` inside a string value."""
 
 
 def build_system_prompt() -> str:
