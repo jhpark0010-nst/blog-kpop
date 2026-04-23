@@ -64,13 +64,15 @@ Reply with **raw JSON only** (no markdown fence). Schema:
 ```
 {
   "action": "fix" | "notify" | "pass",
-  "reason": "One-line summary of what was found",
-  "issues": ["detailed issue 1", "detailed issue 2"],
-  "new_content": "(if action=fix) full replacement HTML body (content only, no comment header)",
-  "new_meta_desc": "(optional, if meta needs fixing)",
-  "new_title": "(optional)"
+  "reason": "한 줄 요약 (한국어로 작성)",
+  "issues": ["상세 이슈 1 (한국어)", "상세 이슈 2 (한국어)"],
+  "new_content": "(if action=fix) full replacement HTML body in English (content only, no comment header)",
+  "new_meta_desc": "(optional, if meta needs fixing — English, for WP)",
+  "new_title": "(optional — English, for WP)"
 }
 ```
+
+**중요**: `reason` 과 `issues` 필드는 **반드시 한국어로** 작성 (사용자가 Slack에서 읽음). `new_content`/`new_title`/`new_meta_desc` 는 영어 유지 (블로그 본문은 영어 독자 대상).
 
 ## Action rules
 
