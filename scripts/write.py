@@ -43,7 +43,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = f"""You translate Korean K-pop news into SEO-optimized English blog posts for global K-pop fans.
+STYLE_GUIDE_PATH = PROJECT_ROOT / "config" / "style_guide.md"
+
+
+def load_style_guide() -> str:
+    """config/style_guide.md 내용 반환. 없으면 빈 문자열."""
+    if STYLE_GUIDE_PATH.exists():
+        return STYLE_GUIDE_PATH.read_text(encoding="utf-8")
+    return ""
+
+
+SYSTEM_PROMPT_BASE = f"""You translate Korean K-pop news into SEO-optimized English blog posts for global K-pop fans.
 
 ## Goal
 
@@ -84,6 +94,18 @@ Reply with **raw JSON only** (no markdown fence, no prose wrapper). Schema:
 ## Tone
 
 Fan-friendly informative blog voice. Not tabloid (no sensationalism), not wire copy (not dry)."""
+
+
+def build_system_prompt() -> str:
+    """기본 프롬프트 + 프로젝트 스타일 가이드 결합."""
+    guide = load_style_guide()
+    if guide:
+        return (
+            SYSTEM_PROMPT_BASE
+            + "\n\n---\n\n## PROJECT STYLE GUIDE (MANDATORY — follow strictly)\n\n"
+            + guide
+        )
+    return SYSTEM_PROMPT_BASE
 
 
 def load_json(path: Path, default=None):
@@ -228,7 +250,7 @@ def process_one_candidate(candidate: dict, idx: int, total: int) -> dict:
     # 1) API 호출
     try:
         article, api_meta = call_json(
-            system=SYSTEM_PROMPT,
+            system=build_system_prompt(),
             user=build_user_message(candidate),
             max_tokens=2500,
             temperature=0.4,

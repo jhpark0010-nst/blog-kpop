@@ -48,7 +48,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are a post-publication auditor for an English K-pop news blog. Review a freshly published article against 4 criteria and decide an action.
+STYLE_GUIDE_PATH = PROJECT_ROOT / "config" / "style_guide.md"
+
+
+def load_style_guide() -> str:
+    if STYLE_GUIDE_PATH.exists():
+        return STYLE_GUIDE_PATH.read_text(encoding="utf-8")
+    return ""
+
+
+SYSTEM_PROMPT_BASE = """You are a post-publication auditor for an English K-pop news blog. Review a freshly published article against 4 criteria and decide an action.
 
 ## Criteria
 
@@ -82,6 +91,18 @@ Reply with **raw JSON only** (no markdown fence). Schema:
 
 Be conservative: when unsure, prefer `pass` over `fix`. Never invent facts in `new_content`.
 """
+
+
+def build_system_prompt() -> str:
+    """기본 프롬프트 + 프로젝트 스타일 가이드."""
+    guide = load_style_guide()
+    if guide:
+        return (
+            SYSTEM_PROMPT_BASE
+            + "\n\n---\n\n## PROJECT STYLE GUIDE (check compliance)\n\n"
+            + guide
+        )
+    return SYSTEM_PROMPT_BASE
 
 
 def load_json(path: Path, default=None):
@@ -198,7 +219,7 @@ def review_one_file(filepath: Path, recent_titles: list[str]) -> dict:
 
     try:
         result, api_meta = call_json(
-            system=SYSTEM_PROMPT,
+            system=build_system_prompt(),
             user=build_review_input(body_only, meta, source_summary, recent_titles),
             max_tokens=3500,
             temperature=0.2,
