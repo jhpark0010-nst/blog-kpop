@@ -39,6 +39,55 @@ def strip_code_fences(text: str) -> str:
     return text
 
 
+def try_repair_unescaped_quotes(text: str):
+    """최후 수단: JSON string value 안의 이스케이프 안 된 ASCII `"` 를 자동 escape 후 재파싱.
+
+    휴리스틱 스캐너 — 문자열 안에 있다가 만난 `"` 뒤의 non-ws 가
+    구조적 문자(`:`, `,`, `}`, `]`)가 아니면 이스케이프 누락으로 간주.
+    fragile 하므로 retry 모두 실패 이후 last-resort 로만 호출.
+
+    성공 시 파싱된 객체, 실패 시 None.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            out.append(c)
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if c == '"':
+            if not in_string:
+                in_string = True
+                out.append(c)
+                i += 1
+                continue
+            # 닫힘 판단: 다음 non-ws 가 구조 문자면 진짜 닫음
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j >= n or text[j] in ":,}]":
+                in_string = False
+                out.append(c)
+                i += 1
+                continue
+            # 아니면 이스케이프 누락으로 간주
+            out.append("\\")
+            out.append('"')
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+
+    try:
+        return json.loads("".join(out))
+    except json.JSONDecodeError:
+        return None
+
+
 def call_messages(
     *,
     system: str,
@@ -91,6 +140,7 @@ def call_json(
     모든 호출을 합산해서 반환 (비용 집계 용).
     """
     last_exc: Exception | None = None
+    last_text: str | None = None
     total_in = total_out = 0
     final_model = model
 
@@ -103,6 +153,7 @@ def call_json(
             model=model,
             temperature=min(temp, 1.0),
         )
+        last_text = text
         total_in += meta.get("input_tokens", 0)
         total_out += meta.get("output_tokens", 0)
         final_model = meta.get("model", final_model)
@@ -123,8 +174,21 @@ def call_json(
                 f"JSON 파싱 실패 (attempt {attempt + 1}/{retries + 1}): {e}",
                 file=sys.stderr,
             )
-            if attempt == retries:
-                print(f"최종 원본 앞 500자: {text[:500]}", file=sys.stderr)
+
+    # 모든 retry 실패 — 마지막 text 에 대해 자동 escape 복구 1회 시도
+    if last_text is not None:
+        repaired = try_repair_unescaped_quotes(strip_code_fences(last_text))
+        if repaired is not None:
+            print("JSON 자동 복구 성공 (unescaped quotes)", file=sys.stderr)
+            return repaired, {
+                "stop_reason": "repaired",
+                "input_tokens": total_in,
+                "output_tokens": total_out,
+                "model": final_model,
+                "json_retries": retries,
+                "json_repaired": True,
+            }
+        print(f"최종 원본 앞 500자: {last_text[:500]}", file=sys.stderr)
 
     assert last_exc is not None
     raise last_exc

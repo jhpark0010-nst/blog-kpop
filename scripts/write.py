@@ -105,15 +105,28 @@ Reply with **raw JSON only** (no markdown fence, no prose wrapper). Schema:
 
 Fan-friendly informative blog voice. Not tabloid (no sensationalism), not wire copy (not dry).
 
-## ⚠️ JSON string escaping (strict)
+## ⚠️ JSON string escaping (CRITICAL — this has broken past runs)
 
-Your entire response is a single JSON object. **Do NOT put raw ASCII double quotes inside any string field** — they will break JSON parsing. When quoting speech, titles, or phrases inside `title_en`, `meta_desc`, or any `body_paragraphs` item:
+Your entire response is a single JSON object parsed by `json.loads()` in Python. Song titles, album names, and quoted phrases inside `title_en`, `meta_desc`, or `body_paragraphs` items must **NEVER use raw ASCII double quotes**, because they will terminate the JSON string and break parsing.
 
-- Prefer curly/smart quotes: left U+201C and right U+201D (“ … ”)
-- Or use single quotes: 'like this'
-- Only use JSON-escaped ASCII quotes if you really must
+**Song/album titles → use SINGLE quotes or italics wording. Not double quotes.**
 
-If the source Korean uses ASCII double quotes around a phrase, translate with smart quotes. Never emit a literal ASCII `"` inside a string value."""
+WRONG (breaks JSON — do not emit this):
+```
+"body_paragraphs": ["LE SSERAFIM dropped their lead single "Celebration" today..."]
+```
+
+CORRECT (single quotes):
+```
+"body_paragraphs": ["LE SSERAFIM dropped their lead single 'Celebration' today..."]
+```
+
+ALSO CORRECT (italics wording, no quotes at all):
+```
+"body_paragraphs": ["LE SSERAFIM dropped Celebration, the lead single from their second album, today..."]
+```
+
+Same rule for every string field. When in doubt, use single quotes `'…'`. Do not emit a literal ASCII `"` inside any string value."""
 
 
 def build_system_prompt() -> str:
