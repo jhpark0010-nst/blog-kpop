@@ -59,7 +59,10 @@ SYSTEM_PROMPT_BASE = """You are a post-publication auditor for an English K-pop 
 
 ## Criteria
 
-1. **Duplicate**: Does this article heavily overlap with a recent post (same event, same artist, same angle)?
+1. **Duplicate**: Does this article cover the **same release / event / incident** as a recent post? Only flag as duplicate if the **specific subject matter** overlaps — not just the same artist, same chart type, or same general topic.
+   - NOT a duplicate: "BTS 'ARIRANG' on Billboard 200 Week 4" vs "BTS 'SWIM' on Billboard Hot 100 Week 4" — different songs, different charts, independent news.
+   - NOT a duplicate: TWICE comeback announcement vs TWICE concert tour news — same artist, different events.
+   - IS a duplicate: two articles about the same song debuting on the same chart in the same week (same event, different headline wording).
 2. **Factual accuracy**: Compared with the source summary, are numbers/dates/chart positions/names consistent? Any invented facts?
 3. **Readability**: Typos, awkward sentences, unnatural phrasing in English body.
 4. **SEO**: Title length (40-65 chars), meta length (140-155), slug format, H2 quality, FAQ PAA style.

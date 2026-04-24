@@ -32,19 +32,28 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_MODEL: ${{ secrets.CLAUDE_MODEL }}
+          CLAUDE_MODEL_REVIEW: ${{ secrets.CLAUDE_MODEL_REVIEW }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python scripts/review.py
 
-      - name: review-actions.json 커밋 (FIX 있을 때만)
+      - name: Apply FIX to WP (inline — review-apply workflow 가 GITHUB_TOKEN push 로 트리거 안 되므로)
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USERNAME: ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python scripts/apply_review_actions.py
+
+      - name: review-actions.json 커밋 (FIX 생성+적용 결과)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/review-actions.json
           if git diff --staged --quiet; then
-            echo "FIX 액션 없음, 커밋 생략"
+            echo "변경사항 없음"
           else
             TIMESTAMP=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')
-            git commit -m "review: ${TIMESTAMP}"
+            git commit -m "review: ${TIMESTAMP} (FIX 생성+적용)"
             git pull --rebase origin main
             git push
           fi
