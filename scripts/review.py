@@ -66,6 +66,14 @@ SYSTEM_PROMPT_BASE = """You are a post-publication auditor for an English K-pop 
 2. **Factual accuracy**: Compared with the source summary, are numbers/dates/chart positions/names consistent? Any invented facts?
 3. **Readability**: Typos, awkward sentences, unnatural phrasing in English body.
 4. **SEO**: Title length (40-65 chars), meta length (140-155), slug format, H2 quality, FAQ PAA style.
+5. **AI tells (important — AdSense policy)**: Auto-generated content without editorial polish is denied monetization by AdSense. The system computes `ai_phrase_count` and `ai_phrase_examples` meta. **If `ai_phrase_count >= 4`, treat as AI-heavy and FIX with rewritten prose.** Also watch for these patterns even when count is low:
+   - Clichés: "delve into", "navigate the world of", "make waves", "in the world of K-pop", "took the K-pop world by storm", "left fans in awe", "ahead of the curve"
+   - Overused adjectives repeated: "stunning", "captivating", "groundbreaking", "phenomenal", "iconic"
+   - Filler verbs: "leverage", "harness", "spearhead", "boast" (when redundant)
+   - Empty openings: "In today's K-pop scene...", "It's worth noting that..."
+   - Generic closings: "without a doubt", "needless to say", "this is just the beginning"
+
+   How to fix: keep all factual content (artist names, chart positions, dates, quotes), but rewrite flowery / generic prose into specific, plain English. **Never remove information.**
 
 ## Output
 
@@ -201,12 +209,58 @@ def collect_recent_titles(exclude_path: Path) -> list[str]:
     return titles
 
 
+# 영문 K-pop 블로그 AI 흔적 패턴. 단어 경계 매칭으로 false positive 줄임.
+AI_PHRASE_PATTERNS_EN = [
+    r"\bdelve\s+(?:in|into|deeper)\b",
+    r"\bnavigate\s+(?:the\s+world|the\s+complexities|the\s+realm)\b",
+    r"\bmake\s+waves\b",
+    r"\btook\s+the\s+(?:K-pop\s+)?world\s+by\s+storm\b",
+    r"\bleft\s+fans\s+in\s+awe\b",
+    r"\bahead\s+of\s+the\s+curve\b",
+    r"\bin\s+today'?s\s+(?:fast-paced|K-pop|world)\b",
+    r"\bwithout\s+a\s+doubt\b",
+    r"\bneedless\s+to\s+say\b",
+    r"\bit'?s\s+worth\s+noting\b",
+    r"\bin\s+the\s+world\s+of\s+K-pop\b",
+    r"\b(?:groundbreaking|captivating|stunning|phenomenal|iconic)\b",
+    r"\b(?:leverage|leveraging|harness|harnessing|spearhead|spearheaded)\b",
+    r"\bboasts?\s+(?:a|an|over|more\s+than)\b",
+    r"\bthis\s+is\s+just\s+the\s+beginning\b",
+    r"\bset\s+the\s+stage\b",
+    r"\bplethora\s+of\b",
+    r"\bmyriad\s+(?:of\s+)?\b",
+    r"\b(?:tapestry|realm)\s+of\b",
+    r"\bcomprehensive\s+(?:overview|guide)\b",
+]
+
+TAG_STRIP_RE = re.compile(r"<[^>]+>")
+
+
+def count_ai_phrases(plain_text: str, patterns: list[str]) -> tuple[int, list[str]]:
+    """Count AI-typical phrases. Return (total_count, up to 5 unique example matches)."""
+    matches = []
+    for pat in patterns:
+        for m in re.finditer(pat, plain_text, re.IGNORECASE):
+            matches.append(m.group(0).strip().lower())
+    seen = set()
+    examples = []
+    for m in matches:
+        if m not in seen:
+            seen.add(m)
+            examples.append(m)
+        if len(examples) >= 5:
+            break
+    return len(matches), examples
+
+
 def build_review_input(
     article_html: str,
     article_meta: dict,
     source_summary: str | None,
     recent_titles: list[str],
 ) -> str:
+    plain = TAG_STRIP_RE.sub(" ", article_html)
+    ai_count, ai_examples = count_ai_phrases(plain, AI_PHRASE_PATTERNS_EN)
     return (
         "## Article under review\n\n"
         f"**Title**: {article_meta.get('title', '')}\n"
@@ -214,6 +268,10 @@ def build_review_input(
         f"**Slug**: {article_meta.get('slug', '')}\n"
         f"**Original (Korean)**: {article_meta.get('originaltitle', '')}\n"
         f"**Source URL**: {article_meta.get('originalurl', '')}\n\n"
+        "### System pre-check meta (AI tone detection)\n\n"
+        f"  - ai_phrase_count: {ai_count}\n"
+        f"  - ai_phrase_examples: {ai_examples}\n"
+        f"  (4+ → flag as AI-heavy and FIX. <4 → still scan body for cliché patterns.)\n\n"
         "### Full HTML body\n\n"
         f"{article_html[:8000]}\n\n"
         "### Source article excerpt (for fact check)\n\n"
