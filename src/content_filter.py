@@ -92,6 +92,9 @@ def filter_items(
 
     passed = []
     rejected_count = 0
+    # batch 내 dedup — 같은 cron 안 두 매체가 같은 사건 보도하면 둘 다 신규라
+    # recent_titles 만 비교하면 못 잡음. 통과 제목 누적해서 비교.
+    seen_titles = list(recent_titles)
 
     for item in items:
         title = item.get("title", "")
@@ -110,8 +113,8 @@ def filter_items(
             rejected_count += 1
             continue
 
-        # 3) Jaccard 유사도 중복
-        is_dup, dup_title = jaccard_similar(title, recent_titles)
+        # 3) Jaccard 유사도 중복 (recent + 같은 batch 통과 항목)
+        is_dup, dup_title = jaccard_similar(title, seen_titles)
         if is_dup:
             logger.debug(f"  [제외] {title[:50]} — 유사 제목: {dup_title[:40]}")
             rejected_count += 1
@@ -119,6 +122,7 @@ def filter_items(
 
         item["filter_reason"] = f"K-pop 키워드: {', '.join(matched_kws[:5])}"
         passed.append(item)
+        seen_titles.append(title)  # batch 내 dedup 누적
         logger.info(f"  [통과] {title[:50]} — {item['filter_reason']}")
 
     logger.info(f"[필터링] 전체 {len(items)}건 → 통과 {len(passed)}건, 제외 {rejected_count}건")
