@@ -31,10 +31,15 @@ from config.settings import (
 )
 from scripts.publish_drafts import publish_single_draft
 from src.anthropic_helper import call_json, estimate_cost_usd
+from src.content_filter import jaccard_similar
 
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 DRAFTS_DIR = PROJECT_ROOT / "data" / "drafts"
+PUBLISHED_DIR = DRAFTS_DIR / "published"
 DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# 발행 직전 중복 체크 윈도우 (일).
+WRITER_DEDUP_DAYS = 7
 
 logging.basicConfig(
     level=logging.INFO,
@@ -170,6 +175,68 @@ def pick_top_candidates(items: list[dict], n: int) -> list[dict]:
         key=lambda x: (x.get("score", 0), x.get("collected_at", "")),
         reverse=True,
     )[:n]
+
+
+def _recent_published_titles(days: int = WRITER_DEDUP_DAYS) -> list[str]:
+    """data/drafts/published/*.html 중 최근 N일 발행글의 제목 (한국어 OriginalTitle 우선).
+
+    영어 Title 도 공용해 K-pop 명사(아티스트/곡명) bigram 매칭 가능.
+    """
+    if not PUBLISHED_DIR.exists():
+        return []
+    now = datetime.now()
+    titles: list[str] = []
+    for html_path in PUBLISHED_DIR.glob("*.html"):
+        text = html_path.read_text(encoding="utf-8")[:3000]
+        title = None
+        original_title = None
+        created_str = None
+        for m in re.finditer(r"<!--(.*?)-->", text, re.DOTALL):
+            for line in m.group(1).splitlines():
+                if ":" not in line:
+                    continue
+                k, _, v = line.partition(":")
+                k = k.strip().lower()
+                v = v.strip()
+                if k == "title" and not title:
+                    title = v
+                elif k == "originaltitle" and not original_title:
+                    original_title = v
+                elif k in ("publishedat", "created") and not created_str:
+                    created_str = v
+        if not created_str:
+            continue
+        try:
+            dt = datetime.fromisoformat(created_str)
+            dt_naive = dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except ValueError:
+            continue
+        if (now - dt_naive).total_seconds() > days * 86400:
+            continue
+        # 한국어 원제와 영문 제목 둘 다 비교 풀에 추가 (jaccard bigram 은 둘 다 잘 동작)
+        if original_title:
+            titles.append(original_title)
+        if title:
+            titles.append(title)
+    return titles
+
+
+def filter_against_recent_published(candidates: list[dict]) -> tuple[list[dict], list[str]]:
+    """후보 중 최근 7일 발행글과 유사한 것 제외. (남은 후보, 스킵된 guid 리스트) 반환."""
+    recent = _recent_published_titles()
+    if not recent:
+        return candidates, []
+    kept: list[dict] = []
+    skipped_guids: list[str] = []
+    for cand in candidates:
+        title = cand.get("title", "")
+        is_dup, dup_title = jaccard_similar(title, recent)
+        if is_dup:
+            logger.warning(f"  [스킵] 최근 발행과 유사: {title[:55]} ↔ {dup_title[:40]}")
+            skipped_guids.append(cand.get("guid", ""))
+            continue
+        kept.append(cand)
+    return kept, skipped_guids
 
 
 def build_user_message(item: dict) -> str:
@@ -395,7 +462,27 @@ def main() -> int:
         slack_notify("⏸️ *Writer*: 작성 후보 없음")
         return 0
 
-    selected = pick_top_candidates(items, WRITER_ARTICLES_PER_RUN)
+    # 최근 7일 발행글과 유사한 후보 제외 — Evaluator/collect 가 못 잡은
+    # "candidates 에 머무는 사이 비슷한 글이 발행된" 케이스 방어.
+    items_filtered, skipped_guids = filter_against_recent_published(items)
+
+    if skipped_guids:
+        skip_set = set(skipped_guids)
+        new_items = [i for i in items if i.get("guid", "") not in skip_set]
+        save_json(CANDIDATES_PATH, {
+            "last_updated": datetime.now().isoformat(),
+            "items": new_items,
+        })
+        logger.info(f"중복 스킵된 후보 {len(skipped_guids)}건 candidates 에서 제거")
+
+    if not items_filtered:
+        slack_notify(
+            f"⏸️ *Writer*: 작성 후보 없음"
+            + (f" (최근 발행 중복으로 {len(skipped_guids)}건 스킵)" if skipped_guids else "")
+        )
+        return 0
+
+    selected = pick_top_candidates(items_filtered, WRITER_ARTICLES_PER_RUN)
     actual_n = len(selected)
     logger.info(f"선택: {actual_n}건")
 
