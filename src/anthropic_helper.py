@@ -39,6 +39,36 @@ def strip_code_fences(text: str) -> str:
     return text
 
 
+def extract_json_object(text: str) -> str:
+    """첫 '{' 부터 균형 맞는 '}' 까지 추출. Claude 자연어 prefix 잘라냄."""
+    start = text.find("{")
+    if start == -1:
+        return text
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape:
+            escape = False
+            continue
+        if c == "\\" and in_string:
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return text[start:]
+
+
 def try_repair_unescaped_quotes(text: str):
     """최후 수단: JSON string value 안의 이스케이프 안 된 ASCII `"` 를 자동 escape 후 재파싱.
 
@@ -158,7 +188,8 @@ def call_json(
         total_out += meta.get("output_tokens", 0)
         final_model = meta.get("model", final_model)
 
-        stripped = strip_code_fences(text)
+        # 1) 코드펜스 제거 → 2) 첫 '{' 부터 추출 (자연어 prefix 잘라냄)
+        stripped = extract_json_object(strip_code_fences(text))
         try:
             parsed = json.loads(stripped)
             return parsed, {
@@ -177,7 +208,7 @@ def call_json(
 
     # 모든 retry 실패 — 마지막 text 에 대해 자동 escape 복구 1회 시도
     if last_text is not None:
-        repaired = try_repair_unescaped_quotes(strip_code_fences(last_text))
+        repaired = try_repair_unescaped_quotes(extract_json_object(strip_code_fences(last_text)))
         if repaired is not None:
             print("JSON 자동 복구 성공 (unescaped quotes)", file=sys.stderr)
             return repaired, {

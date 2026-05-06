@@ -76,7 +76,7 @@ Exception: intro/lead sentence may be slightly adapted for SEO (include artist n
 
 ## Output
 
-Reply with **raw JSON only** (no markdown fence, no prose wrapper). Schema:
+Reply with **raw JSON only**. The first character of your response must be `{` and the last character must be `}`. No markdown fence, no prose wrapper, no thinking-out-loud preface (e.g., "I need to work with..."). Schema:
 
 ```
 {{
