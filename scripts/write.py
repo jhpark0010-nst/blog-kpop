@@ -31,7 +31,7 @@ from config.settings import (
 )
 from scripts.publish_drafts import publish_single_draft
 from src.anthropic_helper import call_json, estimate_cost_usd
-from src.content_filter import jaccard_similar
+from src.content_filter import is_similar, jaccard_similar
 
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 DRAFTS_DIR = PROJECT_ROOT / "data" / "drafts"
@@ -76,7 +76,7 @@ Exception: intro/lead sentence may be slightly adapted for SEO (include artist n
 
 ## Output
 
-Reply with **raw JSON only**. The first character of your response must be `{` and the last character must be `}`. No markdown fence, no prose wrapper, no thinking-out-loud preface (e.g., "I need to work with..."). Schema:
+Reply with **raw JSON only**. The first character of your response must be `{{` and the last character must be `}}`. No markdown fence, no prose wrapper, no thinking-out-loud preface (e.g., "I need to work with..."). Schema:
 
 ```
 {{
@@ -222,7 +222,12 @@ def _recent_published_titles(days: int = WRITER_DEDUP_DAYS) -> list[str]:
 
 
 def filter_against_recent_published(candidates: list[dict]) -> tuple[list[dict], list[str]]:
-    """후보 중 최근 7일 발행글과 유사한 것 제외. (남은 후보, 스킵된 guid 리스트) 반환."""
+    """후보 중 최근 7일 발행글과 유사한 것 제외. (남은 후보, 스킵된 guid 리스트) 반환.
+
+    jaccard (0.35+) OR bigram 공통 6+ 둘 중 하나라도 매칭되면 중복 판정.
+    jaccard 만으로는 동일 사건의 매체별 헤드라인 변형(예: 같은 I.O.I MV 티저
+    뉴스를 MyDaily 와 TVReport 가 다른 헤드라인으로 보도)을 못 잡는 케이스 대응.
+    """
     recent = _recent_published_titles()
     if not recent:
         return candidates, []
@@ -230,9 +235,16 @@ def filter_against_recent_published(candidates: list[dict]) -> tuple[list[dict],
     skipped_guids: list[str] = []
     for cand in candidates:
         title = cand.get("title", "")
-        is_dup, dup_title = jaccard_similar(title, recent)
-        if is_dup:
-            logger.warning(f"  [스킵] 최근 발행과 유사: {title[:55]} ↔ {dup_title[:40]}")
+        # 1) jaccard 0.35+ 매칭
+        is_dup_j, dup_title = jaccard_similar(title, recent)
+        # 2) bigram 공통 6+ (단순 카운트)
+        is_dup_b = is_similar(title, recent, min_common_bigrams=6)
+        if is_dup_j or is_dup_b:
+            method = "jaccard" if is_dup_j else "bigram6"
+            target = dup_title if dup_title else "(bigram match)"
+            logger.warning(
+                f"  [스킵-{method}] 최근 발행과 유사: {title[:55]} ↔ {target[:40]}"
+            )
             skipped_guids.append(cand.get("guid", ""))
             continue
         kept.append(cand)
