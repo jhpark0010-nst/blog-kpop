@@ -264,6 +264,58 @@ def _recent_published_titles(days: int = WRITER_DEDUP_DAYS) -> list[str]:
     return titles
 
 
+def claude_semantic_dedup_check(
+    candidate: dict, recent_titles: list[str]
+) -> tuple[bool, str]:
+    """Claude 의미 기반 중복 체크. 텍스트 bigram 으론 못 잡는 같은 사건 다른 헤드라인 케이스 대응.
+
+    예: BTS 정국 책 시리즈 — 한 매체는 "황금 막내 정국, 美 초등생 교육 도서 주인공",
+    다른 매체는 "호날두·스위프트와 어깨 나란히…BTS 정국 미국 초등학생 공식 롤모델 등극"
+    — bigram 공통 4개라 통과하지만 의미적으로 같은 사건.
+
+    Haiku 사용으로 호출당 ~$0.001. 실패 시 안전 모드 = 통과.
+    Returns: (is_duplicate, matched_title).
+    """
+    if not recent_titles:
+        return False, ""
+
+    title = candidate.get("title", "")
+    summary = (candidate.get("summary", "") or "")[:300]
+
+    sample = recent_titles[:30]
+    system = (
+        "You judge whether a NEW K-pop news candidate covers the SAME event/release/incident "
+        "as any of the RECENT PUBLISHED titles. Same artist + different song/album/event = NOT a duplicate. "
+        "Same artist + same specific event/release (even if headlines word it differently) = duplicate."
+    )
+    user = (
+        "NEW CANDIDATE:\n"
+        f"Title (Korean source): {title}\n"
+        f"Summary excerpt: {summary}\n\n"
+        "RECENT PUBLISHED titles (English titles or Korean source titles):\n"
+        + "\n".join(f"- {t}" for t in sample)
+        + "\n\nReturn raw JSON only: "
+        + '{"is_duplicate": true|false, "matched": "exact matching title or empty"}'
+    )
+
+    try:
+        model = (
+            os.environ.get("CLAUDE_MODEL_REVIEW", "").strip()
+            or "claude-haiku-4-5-20251001"
+        )
+        result, _ = call_json(
+            system=system,
+            user=user,
+            max_tokens=200,
+            temperature=0.1,
+            model=model,
+        )
+        return bool(result.get("is_duplicate", False)), str(result.get("matched", ""))
+    except Exception as e:
+        logger.warning(f"Claude dedup 체크 실패 (통과 처리): {e}")
+        return False, ""
+
+
 def filter_against_recent_published(candidates: list[dict]) -> tuple[list[dict], list[str]]:
     """후보 중 최근 7일 발행글과 유사한 것 제외. (남은 후보, 스킵된 guid 리스트) 반환.
 
@@ -543,16 +595,37 @@ def main() -> int:
     selected, intra_skipped = pick_top_candidates_with_intra_dedup(
         items_filtered, WRITER_ARTICLES_PER_RUN, recent_for_intra,
     )
-    if intra_skipped:
-        skip_set = set(intra_skipped)
-        # candidates 에서도 제거 (다음 cron 에 또 픽되지 않게)
+
+    # Claude 의미 기반 dedup — bigram 으론 못 잡는 같은 사건 다른 헤드라인 케이스
+    semantic_skipped: list[str] = []
+    if selected:
+        approved = []
+        for cand in selected:
+            is_dup, matched = claude_semantic_dedup_check(cand, recent_for_intra)
+            if is_dup:
+                logger.warning(
+                    f"  [Claude semantic skip] {cand.get('title', '')[:55]} "
+                    f"↔ {matched[:40]}"
+                )
+                semantic_skipped.append(cand.get("guid", ""))
+                continue
+            approved.append(cand)
+        selected = approved
+
+    # 스킵된 후보들 candidates 에서도 제거 (다음 cron 에 또 픽되지 않게)
+    all_skipped = list(intra_skipped) + semantic_skipped
+    if all_skipped:
+        skip_set = set(all_skipped)
         cur = load_json(CANDIDATES_PATH, {"last_updated": "", "items": []}).get("items", [])
         cur_clean = [i for i in cur if i.get("guid", "") not in skip_set]
         save_json(CANDIDATES_PATH, {
             "last_updated": datetime.now().isoformat(),
             "items": cur_clean,
         })
-        logger.info(f"intra-batch 중복 {len(intra_skipped)}건 candidates 에서 제거")
+        logger.info(
+            f"중복 스킵 {len(all_skipped)}건 candidates 에서 제거 "
+            f"(intra={len(intra_skipped)}, semantic={len(semantic_skipped)})"
+        )
     actual_n = len(selected)
     logger.info(f"선택: {actual_n}건")
 
