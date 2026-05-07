@@ -169,12 +169,55 @@ def slack_notify(text: str) -> None:
 
 
 def pick_top_candidates(items: list[dict], n: int) -> list[dict]:
-    """score 상위 N건 선택. 동점 시 collected_at 최신 우선."""
+    """score 상위 N건 선택. 동점 시 collected_at 최신 우선.
+
+    주의: batch 내 dedup 미포함. filter_against_recent_published 가 published 와만
+    비교하므로, 한 cron 안에 N>1 픽하는 경우 후보들끼리 비슷하면 둘 다 통과 가능.
+    이 케이스는 pick_top_candidates_with_intra_dedup 사용.
+    """
     return sorted(
         items,
         key=lambda x: (x.get("score", 0), x.get("collected_at", "")),
         reverse=True,
     )[:n]
+
+
+def pick_top_candidates_with_intra_dedup(
+    items: list[dict],
+    n: int,
+    initial_recent_titles: list[str],
+) -> tuple[list[dict], list[str]]:
+    """score 정렬한 후보를 순회하며 (과거 발행글 + 이번 batch 내 이미 선택된 것)
+    과 dedup 비교해서 통과한 것 N건까지 픽.
+
+    NewJeans 민지 ADOR 처럼 같은 cron 안에서 비슷한 두 후보가 동시 픽되어
+    중복 발행되는 케이스 차단.
+    """
+    sorted_items = sorted(
+        items,
+        key=lambda x: (x.get("score", 0), x.get("collected_at", "")),
+        reverse=True,
+    )
+    picked: list[dict] = []
+    seen_titles = list(initial_recent_titles)
+    skipped_guids: list[str] = []
+    for cand in sorted_items:
+        if len(picked) >= n:
+            break
+        title = cand.get("title", "")
+        is_dup_j, dup_title = jaccard_similar(title, seen_titles)
+        is_dup_b = is_similar(title, seen_titles, min_common_bigrams=6)
+        if is_dup_j or is_dup_b:
+            method = "jaccard" if is_dup_j else "bigram6"
+            target = dup_title if dup_title else "(bigram match)"
+            logger.warning(
+                f"  [intra-batch 스킵-{method}] {title[:55]} ↔ {target[:40]}"
+            )
+            skipped_guids.append(cand.get("guid", ""))
+            continue
+        picked.append(cand)
+        seen_titles.append(title)
+    return picked, skipped_guids
 
 
 def _recent_published_titles(days: int = WRITER_DEDUP_DAYS) -> list[str]:
@@ -494,7 +537,22 @@ def main() -> int:
         )
         return 0
 
-    selected = pick_top_candidates(items_filtered, WRITER_ARTICLES_PER_RUN)
+    # 같은 cron 안에서 비슷한 후보 둘 다 픽돼 중복 발행되는 것 방지.
+    # 위 filter_against_recent_published 에서 모은 recent 와 picked 누적 비교.
+    recent_for_intra = _recent_published_titles()
+    selected, intra_skipped = pick_top_candidates_with_intra_dedup(
+        items_filtered, WRITER_ARTICLES_PER_RUN, recent_for_intra,
+    )
+    if intra_skipped:
+        skip_set = set(intra_skipped)
+        # candidates 에서도 제거 (다음 cron 에 또 픽되지 않게)
+        cur = load_json(CANDIDATES_PATH, {"last_updated": "", "items": []}).get("items", [])
+        cur_clean = [i for i in cur if i.get("guid", "") not in skip_set]
+        save_json(CANDIDATES_PATH, {
+            "last_updated": datetime.now().isoformat(),
+            "items": cur_clean,
+        })
+        logger.info(f"intra-batch 중복 {len(intra_skipped)}건 candidates 에서 제거")
     actual_n = len(selected)
     logger.info(f"선택: {actual_n}건")
 
