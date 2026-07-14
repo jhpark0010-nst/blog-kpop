@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-07-13T23:01:11.946682",
+  "last_updated": "2026-07-14T01:01:06.810035",
   "items": [
     {
       "guid": "https://tvreport.co.kr/uncategorized/article/1060922/",
@@ -17,6 +17,23 @@
       "evaluated_at": "2026-07-13T09:01:10.238430",
       "score": 82,
       "filter_reason": "K-pop 키워드: IVE, 세븐틴, 아이돌, K팝, 앨범"
+    },
+    {
+      "guid": "https://sports.donga.com/ent/article/all/20260714/134293225/1",
+      "source": "스포츠동아",
+      "title": "‘품절녀’ 티파니 영, ♥변요한 결혼 이어 겹경사",
+      "link": "https://sports.donga.com/ent/article/all/20260714/134293225/1",
+      "published": "2026-07-14T09:09:56+09:00",
+      "summary": "[동아닷컴 정희연 기자]가수 티파니 영(Tiffany Young)이 배우 변요한과의 결혼에 이어 데뷔 후 첫 솔로 정규 앨범 발매 소식까지 전하며 겹경사를 맞았다.티파니 영은 지난 13일 공식 SNS를 통해 첫 번째 솔로 정규 앨범 ‘Edge of Calm’(엣지 오브 캄) 스케줄 포스터를 공개하며 오는 8월 20일 컴백을 알렸다. 해당 포스터에는 앨범명 ‘Edge of Calm’의 로고와 함께 티파니 영의 절제된 분위기가 담겼다. 깊이 있는 눈빛과 세련된 스타일링이 어우러지며 새 앨범이 선보일 감성을 예고했다.‘Edge of Calm’은 고요함 직전의 미묘한 긴장감과 감정의 균형을 담아낸 작품이다. 긴장과 몰입을 상징하는 ‘Edge’, 평온을 의미하는 ‘Calm’의 메시지를 사운드와 비주얼 전반에 녹여냈다. 특히 티파니 영은 이번 앨범에서 콘셉트 기획은 물론 스타일링, 비주얼 디렉팅, 뮤직비디오 스토리 작업 등 제작 전반에 직접 참여하며 아티스트로서의 역량을 드러낼 예정이다.",
+      "content": "",
+      "thumbnail_url": "https://dimg.donga.com/wps/SPORTS/FEED/SD_MAIN_2018/134293240.1.thumb.jpg",
+      "category": "K-pop",
+      "priority": 2,
+      "collected_at": "2026-07-14T00:31:01.646528",
+      "status": "passed",
+      "evaluated_at": "2026-07-14T01:01:06.809800",
+      "score": 72,
+      "filter_reason": "K-pop 키워드: 앨범, 뮤직비디오, 컴백, 데뷔"
     }
   ]
 }
